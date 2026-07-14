@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#6C63FF" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>ExpenseFlow — Daily Expense Tracker</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon-rlu_2qZr.svg" />
+  <script type="module" crossorigin src="/assets/index-D0RlAQTD.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-FO9Na2O-.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Top Bar -->
+    <header class="top-bar">
+      <h1 class="logo">💸 ExpenseFlow</h1>
+      <button id="btn-settings" class="icon-btn" aria-label="Settings">⚙️</button>
+    </header>
+
+    <!-- Summary Card -->
+    <section class="summary-card" id="summary-card">
+      <div class="summary-period">
+        <button id="period-prev" class="period-nav" aria-label="Previous">‹</button>
+        <span id="period-label">Today</span>
+        <button id="period-next" class="period-nav" aria-label="Next">›</button>
+      </div>
+      <div class="summary-amount" id="summary-amount">$0.00</div>
+      <div class="summary-meta" id="summary-meta">0 expenses</div>
+      <div class="summary-tabs">
+        <button class="tab active" data-period="day">Day</button>
+        <button class="tab" data-period="week">Week</button>
+        <button class="tab" data-period="month">Month</button>
+      </div>
+    </section>
+
+    <!-- Category Breakdown -->
+    <section class="category-section" id="category-section">
+      <h2 class="section-title">Categories</h2>
+      <div class="category-bars" id="category-bars"></div>
+    </section>
+
+    <!-- Expense List -->
+    <section class="expense-list-section">
+      <h2 class="section-title">Expenses <span class="badge" id="expense-count">0</span></h2>
+      <div class="expense-list" id="expense-list">
+        <div class="empty-state" id="empty-state">
+          <span class="empty-icon">📝</span>
+          <p>No expenses yet</p>
+          <p class="empty-sub">Tap + to add your first expense</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAB -->
+    <button class="fab" id="fab-add" aria-label="Add expense">+</button>
+
+    <!-- Add/Edit Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" id="expense-modal">
+        <div class="modal-header">
+          <h2 id="modal-title">Add Expense</h2>
+          <button class="icon-btn modal-close" id="modal-close" aria-label="Close">✕</button>
+        </div>
+        <form id="expense-form" novalidate>
+          <input type="hidden" id="expense-id" />
+
+          <div class="form-group">
+            <label for="expense-amount">Amount</label>
+            <div class="amount-input-wrap">
+              <span class="currency-symbol">$</span>
+              <input type="number" id="expense-amount" inputmode="decimal" step="0.01" min="0" placeholder="0.00" required autocomplete="off" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Category</label>
+            <div class="category-grid" id="category-grid"></div>
+          </div>
+
+          <div class="form-group">
+            <label for="expense-date">Date</label>
+            <input type="date" id="expense-date" required />
+          </div>
+
+          <div class="form-group">
+            <label for="expense-desc">Description <span class="optional">(optional)</span></label>
+            <input type="text" id="expense-desc" placeholder="What was it for?" maxlength="100" autocomplete="off" />
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" id="btn-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary" id="btn-save">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Delete Confirmation -->
+    <div class="modal-overlay" id="delete-overlay">
+      <div class="modal modal-sm">
+        <div class="modal-header">
+          <h2>Delete Expense?</h2>
+        </div>
+        <p class="delete-msg" id="delete-msg">Are you sure?</p>
+        <div class="form-actions">
+          <button class="btn btn-secondary" id="delete-cancel">Cancel</button>
+          <button class="btn btn-danger" id="delete-confirm">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div class="modal-overlay" id="settings-overlay">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button class="icon-btn modal-close" id="settings-close" aria-label="Close">✕</button>
+        </div>
+        <div class="settings-body">
+          <div class="setting-row">
+            <label for="currency-select">Currency</label>
+            <select id="currency-select">
+              <option value="$">$ USD</option>
+              <option value="€">€ EUR</option>
+              <option value="£">£ GBP</option>
+              <option value="¥">¥ JPY/CNY</option>
+              <option value="₹">₹ INR</option>
+              <option value="RM">RM MYR</option>
+              <option value="S$">S$ SGD</option>
+              <option value="A$">A$ AUD</option>
+              <option value="C$">C$ CAD</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>Data</label>
+            <div class="setting-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-export">Export CSV</button>
+              <button class="btn btn-danger btn-sm" id="btn-clear-all">Clear All</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
