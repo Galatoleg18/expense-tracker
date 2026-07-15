@@ -3,6 +3,570 @@
 // Vanilla JS | No frameworks | v3.0
 // ========================================
 
+// ========================================
+// SUPABASE CONFIG
+// ========================================
+const SUPABASE_URL = 'https://uitzxtrkenciwigorday.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_p_VegYRa0IQPx7HsL9cyxQ_wTSslOR1';
+
+let supabase = null;
+let currentUser = null;
+let isGuestMode = false;
+
+const SYNC_QUEUE_KEY = 'expenseflow_sync_queue';
+const GUEST_MODE_KEY = 'expenseflow_guest_mode';
+
+// Initialize Supabase client (called after DOM ready)
+function initSupabase() {
+  try {
+    if (window.supabase && window.supabase.createClient) {
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    }
+  } catch (err) {
+    console.warn('Supabase init failed, running in guest mode:', err);
+  }
+}
+
+// ========================================
+// SYNC STATUS INDICATOR
+// ========================================
+function setSyncStatus(status) {
+  // status: 'synced' | 'syncing' | 'offline' | 'hidden'
+  const el = document.getElementById('sync-indicator');
+  if (!el) return;
+  el.className = 'sync-indicator';
+  if (status === 'hidden' || !currentUser) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  if (status === 'synced')  { el.classList.add('synced');  el.textContent = '✓ synced'; }
+  if (status === 'syncing') { el.classList.add('syncing'); el.textContent = '↻ syncing'; }
+  if (status === 'offline') { el.classList.add('offline'); el.textContent = '⚠ offline'; }
+}
+
+// ========================================
+// AUTH UI
+// ========================================
+let authMode = 'signin'; // 'signin' | 'signup'
+
+function showAuthScreen() {
+  const screen = document.getElementById('auth-screen');
+  if (screen) screen.classList.remove('hidden');
+  // Hide the main app
+  document.getElementById('app').style.visibility = 'hidden';
+}
+
+function hideAuthScreen() {
+  const screen = document.getElementById('auth-screen');
+  if (screen) screen.classList.add('hidden');
+  document.getElementById('app').style.visibility = '';
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const titleEl   = document.getElementById('auth-title');
+  const subEl     = document.getElementById('auth-sub');
+  const submitEl  = document.getElementById('auth-submit-label');
+  const toggleEl  = document.getElementById('auth-mode-toggle');
+  const switchTxt = document.getElementById('auth-switch-text');
+  const forgotEl  = document.getElementById('auth-forgot');
+  const passGroup = document.getElementById('auth-password-group');
+
+  if (mode === 'signup') {
+    titleEl.textContent   = 'Create account';
+    subEl.textContent     = 'Start syncing your expenses to the cloud';
+    submitEl.textContent  = 'Sign Up';
+    toggleEl.textContent  = 'Sign In';
+    switchTxt.textContent = 'Already have an account?';
+    forgotEl.style.display = 'none';
+    passGroup.style.display = '';
+  } else if (mode === 'forgot') {
+    titleEl.textContent   = 'Reset password';
+    subEl.textContent     = 'Enter your email and we\'ll send a reset link';
+    submitEl.textContent  = 'Send Reset Link';
+    toggleEl.textContent  = 'Sign In';
+    switchTxt.textContent = 'Remember your password?';
+    forgotEl.style.display = 'none';
+    passGroup.style.display = 'none';
+  } else {
+    titleEl.textContent   = 'Welcome back';
+    subEl.textContent     = 'Sign in to sync your data across devices';
+    submitEl.textContent  = 'Sign In';
+    toggleEl.textContent  = 'Sign Up';
+    switchTxt.textContent = 'Don\'t have an account?';
+    forgotEl.style.display = '';
+    passGroup.style.display = '';
+  }
+
+  clearAuthError();
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+function clearAuthError() {
+  const el = document.getElementById('auth-error');
+  if (el) { el.textContent = ''; el.classList.add('hidden'); }
+}
+
+async function handleAuthSubmit(e) {
+  e.preventDefault();
+  if (!supabase) { showAuthError('Auth service unavailable. Continue as guest.'); return; }
+
+  const email    = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password')?.value || '';
+  const submitBtn = document.getElementById('auth-submit');
+  const labelEl   = document.getElementById('auth-submit-label');
+
+  clearAuthError();
+  submitBtn.disabled = true;
+  const origLabel = labelEl.textContent;
+  labelEl.textContent = 'Please wait…';
+
+  try {
+    if (authMode === 'forgot') {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.href,
+      });
+      if (error) throw error;
+      showAuthError('✓ Reset link sent! Check your email.');
+      submitBtn.disabled = false;
+      labelEl.textContent = origLabel;
+      return;
+    }
+
+    let result;
+    if (authMode === 'signup') {
+      result = await supabase.auth.signUp({ email, password });
+    } else {
+      result = await supabase.auth.signInWithPassword({ email, password });
+    }
+
+    const { data, error } = result;
+    if (error) throw error;
+
+    if (authMode === 'signup' && data.user && !data.session) {
+      // Email confirmation required
+      showAuthError('✓ Check your email to confirm your account!');
+      submitBtn.disabled = false;
+      labelEl.textContent = origLabel;
+      return;
+    }
+
+    if (data.user) {
+      const isNewUser = authMode === 'signup';
+      await onAuthSuccess(data.user, isNewUser);
+    }
+  } catch (err) {
+    submitBtn.disabled = false;
+    labelEl.textContent = origLabel;
+    let msg = err.message || 'Something went wrong';
+    if (msg.includes('Invalid login credentials')) msg = 'Incorrect email or password.';
+    if (msg.includes('User already registered')) msg = 'An account with this email already exists.';
+    if (msg.includes('Password should be at least')) msg = 'Password must be at least 6 characters.';
+    showAuthError(msg);
+  }
+}
+
+async function onAuthSuccess(user, isNewUser = false) {
+  currentUser = user;
+  isGuestMode = false;
+  localStorage.removeItem(GUEST_MODE_KEY);
+
+  hideAuthScreen();
+  updateAccountUI();
+
+  // For new signups with existing local data, offer migration
+  if (isNewUser) {
+    const hasLocalData = expenses.length > 0 || Object.keys(budgets).length > 0 || templates.length > 0;
+    if (hasLocalData) {
+      showCloudImportPrompt();
+      return;
+    }
+  }
+
+  // Pull data from cloud and merge
+  await pullFromSupabase();
+  render();
+  setSyncStatus('synced');
+  setTimeout(() => flushSyncQueue(), 500);
+}
+
+function enterGuestMode() {
+  currentUser = null;
+  isGuestMode = true;
+  localStorage.setItem(GUEST_MODE_KEY, '1');
+  hideAuthScreen();
+  updateAccountUI();
+  render();
+}
+
+function updateAccountUI() {
+  const accountSection = document.getElementById('account-section');
+  const guestBanner    = document.getElementById('guest-banner');
+  const emailEl        = document.getElementById('settings-user-email');
+  const syncEl         = document.getElementById('sync-indicator');
+
+  if (currentUser) {
+    accountSection && (accountSection.style.display = '');
+    guestBanner?.classList.add('hidden');
+    if (emailEl) emailEl.textContent = currentUser.email || '—';
+    syncEl?.classList.remove('hidden');
+  } else {
+    accountSection && (accountSection.style.display = 'none');
+    if (isGuestMode) {
+      guestBanner?.classList.remove('hidden');
+    } else {
+      guestBanner?.classList.add('hidden');
+    }
+    syncEl?.classList.add('hidden');
+  }
+}
+
+async function signOut() {
+  if (supabase) {
+    await supabase.auth.signOut().catch(() => {});
+  }
+  currentUser = null;
+  isGuestMode = false;
+  localStorage.removeItem(GUEST_MODE_KEY);
+  updateAccountUI();
+  setSyncStatus('hidden');
+  showAuthScreen();
+}
+
+// ========================================
+// CLOUD IMPORT MIGRATION
+// ========================================
+function showCloudImportPrompt() {
+  const overlay = document.getElementById('cloud-import-overlay');
+  if (!overlay) return;
+  const msgEl = document.getElementById('cloud-import-msg');
+  const count = expenses.length;
+  if (msgEl) {
+    msgEl.textContent = `You have ${count} transaction${count !== 1 ? 's' : ''} stored locally. Would you like to upload this data to your new account?`;
+  }
+  overlay.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+async function importLocalDataToCloud() {
+  const overlay = document.getElementById('cloud-import-overlay');
+  overlay?.classList.remove('open');
+  document.body.style.overflow = '';
+
+  if (!currentUser || !supabase) return;
+
+  setSyncStatus('syncing');
+  let synced = 0;
+
+  try {
+    // Upload expenses
+    if (expenses.length > 0) {
+      const rows = expenses.map(e => expenseToRow(e, currentUser.id));
+      const { error } = await supabase.from('expenses').upsert(rows, { onConflict: 'local_id,user_id' });
+      if (!error) synced += rows.length;
+    }
+
+    // Upload budgets
+    const budgetEntries = Object.entries(budgets);
+    if (budgetEntries.length > 0) {
+      const rows = budgetEntries.map(([category, monthly_limit]) => ({
+        user_id: currentUser.id,
+        category,
+        monthly_limit,
+      }));
+      await supabase.from('budgets').upsert(rows, { onConflict: 'user_id,category' });
+    }
+
+    // Upload templates
+    if (templates.length > 0) {
+      const rows = templates.map(t => ({
+        id: t.id,
+        user_id: currentUser.id,
+        name: t.name,
+        amount: t.amount,
+        category: t.category,
+        description: t.icon || '',
+        type: t.type || 'expense',
+      }));
+      await supabase.from('templates').upsert(rows, { onConflict: 'id' });
+    }
+
+    // Upload settings
+    await syncSettingsToSupabase();
+
+    setSyncStatus('synced');
+    showToast(`☁️ ${synced} items uploaded to cloud ✓`);
+  } catch (err) {
+    console.warn('Cloud import error:', err);
+    setSyncStatus('offline');
+    showToast('Import partially failed — will retry on next sync');
+  }
+}
+
+// ========================================
+// SUPABASE DATA HELPERS
+// ========================================
+
+// Convert local expense object → Supabase row
+function expenseToRow(e, userId) {
+  return {
+    user_id:     userId,
+    local_id:    e.id,
+    amount:      e.amount,
+    category:    e.category,
+    date:        e.date,
+    description: e.description || '',
+    type:        e.type || 'expense',
+    recurring:   e.recurring || null,
+    updated_at:  e.updatedAt ? new Date(e.updatedAt).toISOString() : new Date().toISOString(),
+    created_at:  e.createdAt ? new Date(e.createdAt).toISOString() : new Date().toISOString(),
+  };
+}
+
+// Convert Supabase row → local expense object
+function rowToExpense(row) {
+  return {
+    id:          row.local_id || row.id,
+    amount:      parseFloat(row.amount),
+    category:    row.category,
+    date:        row.date,
+    description: row.description || '',
+    type:        row.type || 'expense',
+    recurring:   row.recurring || null,
+    createdAt:   row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    updatedAt:   row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    _serverId:   row.id,
+  };
+}
+
+// ========================================
+// SYNC — PULL FROM SUPABASE
+// ========================================
+async function pullFromSupabase() {
+  if (!supabase || !currentUser) return;
+
+  setSyncStatus('syncing');
+
+  try {
+    // Pull expenses
+    const { data: expRows, error: expErr } = await supabase
+      .from('expenses')
+      .select('*')
+      .eq('user_id', currentUser.id);
+
+    if (!expErr && expRows) {
+      // Merge strategy: server wins on conflict (newer updated_at)
+      const serverMap = {};
+      expRows.forEach(row => {
+        const localId = row.local_id || row.id;
+        serverMap[localId] = row;
+      });
+
+      // Keep local items not on server (pending upload), override with server version when newer
+      const merged = [];
+      const seenIds = new Set();
+
+      expRows.forEach(row => {
+        const localId = row.local_id || row.id;
+        seenIds.add(localId);
+        const local = expenses.find(e => e.id === localId);
+        if (!local) {
+          merged.push(rowToExpense(row));
+        } else {
+          // Server wins if updated_at is newer
+          const serverTime = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+          const localTime  = local.updatedAt || local.createdAt || 0;
+          merged.push(serverTime >= localTime ? rowToExpense(row) : local);
+        }
+      });
+
+      // Local-only items (not yet on server)
+      expenses.forEach(e => {
+        if (!seenIds.has(e.id)) merged.push(e);
+      });
+
+      expenses = merged;
+      saveData();
+    }
+
+    // Pull budgets
+    const { data: budgetRows, error: budgetErr } = await supabase
+      .from('budgets')
+      .select('*')
+      .eq('user_id', currentUser.id);
+
+    if (!budgetErr && budgetRows) {
+      budgetRows.forEach(row => {
+        if (row.monthly_limit > 0) budgets[row.category] = parseFloat(row.monthly_limit);
+      });
+      saveBudgets();
+    }
+
+    // Pull templates
+    const { data: tplRows, error: tplErr } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('user_id', currentUser.id);
+
+    if (!tplErr && tplRows) {
+      const existingIds = new Set(templates.map(t => t.id));
+      tplRows.forEach(row => {
+        if (!existingIds.has(row.id)) {
+          templates.push({
+            id:       row.id,
+            name:     row.name,
+            icon:     row.description || '',
+            amount:   parseFloat(row.amount),
+            category: row.category,
+            type:     row.type || 'expense',
+          });
+        }
+      });
+      saveTemplates();
+    }
+
+    // Pull settings
+    const { data: settRows, error: settErr } = await supabase
+      .from('user_settings')
+      .select('*')
+      .eq('user_id', currentUser.id)
+      .limit(1);
+
+    if (!settErr && settRows && settRows.length > 0) {
+      const sett = settRows[0];
+      if (sett.currency) { currency = sett.currency; }
+      if (sett.theme)    { theme    = sett.theme;    }
+      saveSettings();
+      applyTheme(theme);
+      const currSelect = document.getElementById('currency-select');
+      if (currSelect) currSelect.value = currency;
+    }
+
+    setSyncStatus('synced');
+  } catch (err) {
+    console.warn('Pull from Supabase failed:', err);
+    setSyncStatus(navigator.onLine ? 'synced' : 'offline');
+  }
+}
+
+// ========================================
+// SYNC — PUSH TO SUPABASE
+// ========================================
+async function pushExpenseToSupabase(action, expense) {
+  if (!supabase || !currentUser) return false;
+
+  try {
+    if (action === 'delete') {
+      const { error } = await supabase
+        .from('expenses')
+        .delete()
+        .eq('local_id', expense.id)
+        .eq('user_id', currentUser.id);
+      return !error;
+    } else {
+      const row = expenseToRow(expense, currentUser.id);
+      const { error } = await supabase
+        .from('expenses')
+        .upsert(row, { onConflict: 'local_id,user_id' });
+      return !error;
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function syncSettingsToSupabase() {
+  if (!supabase || !currentUser) return;
+  try {
+    await supabase.from('user_settings').upsert({
+      user_id:  currentUser.id,
+      currency,
+      theme,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+  } catch {}
+}
+
+// ========================================
+// SYNC QUEUE (offline-first)
+// ========================================
+function loadSyncQueue() {
+  try {
+    return JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+  } catch { return []; }
+}
+
+function saveSyncQueue(queue) {
+  localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+}
+
+function enqueueSyncOp(action, table, data) {
+  if (!currentUser) return;
+  const queue = loadSyncQueue();
+  // De-duplicate: remove old op for same item+action
+  const filtered = queue.filter(op =>
+    !(op.table === table && op.data?.id === data?.id && op.action === action)
+  );
+  filtered.push({ action, table, data, timestamp: Date.now() });
+  saveSyncQueue(filtered);
+}
+
+async function flushSyncQueue() {
+  if (!supabase || !currentUser || !navigator.onLine) return;
+
+  const queue = loadSyncQueue();
+  if (queue.length === 0) return;
+
+  setSyncStatus('syncing');
+
+  const remaining = [];
+  for (const op of queue) {
+    let ok = false;
+    try {
+      if (op.table === 'expenses') {
+        ok = await pushExpenseToSupabase(op.action, op.data);
+      } else if (op.table === 'budgets' && op.action !== 'delete') {
+        const { error } = await supabase.from('budgets').upsert({
+          user_id: currentUser.id,
+          category: op.data.category,
+          monthly_limit: op.data.monthly_limit,
+        }, { onConflict: 'user_id,category' });
+        ok = !error;
+      } else if (op.table === 'settings') {
+        await syncSettingsToSupabase();
+        ok = true;
+      }
+    } catch {}
+    if (!ok) remaining.push(op);
+  }
+
+  saveSyncQueue(remaining);
+  setSyncStatus(remaining.length > 0 ? 'offline' : 'synced');
+}
+
+// ========================================
+// ONLINE/OFFLINE LISTENER
+// ========================================
+function initOnlineListeners() {
+  window.addEventListener('online', () => {
+    if (currentUser) {
+      setSyncStatus('syncing');
+      setTimeout(() => flushSyncQueue(), 500);
+    }
+  });
+
+  window.addEventListener('offline', () => {
+    if (currentUser) setSyncStatus('offline');
+  });
+}
+
 // --- Categories (harmonious, modern palette) ---
 const CATEGORIES = [
   { id: 'food',          name: 'Food',      icon: '🍜', color: '#f97316' },
@@ -99,6 +663,11 @@ function saveData() {
 
 function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ currency, theme }));
+  // Sync to Supabase (background)
+  if (currentUser) {
+    enqueueSyncOp('upsert', 'settings', { currency, theme });
+    if (navigator.onLine) syncSettingsToSupabase();
+  }
 }
 
 function saveBudgets() {
@@ -786,6 +1355,7 @@ function handleSave(e) {
         description,
         type: currentType,
         recurring: currentRecurring || null,
+        updatedAt: Date.now(),
       };
       savedExpense = expenses[idx];
     }
@@ -812,6 +1382,27 @@ function handleSave(e) {
     ? `${cat.icon} Transaction updated`
     : `${cat.icon} ${currentType === 'income' ? 'Income' : 'Expense'} added · ${formatMoney(amount)}`;
   showToast(toastMsg);
+
+  // Sync to Supabase (background, offline-first)
+  if (currentUser && savedExpense) {
+    const syncAction = isEditing ? 'update' : 'insert';
+    enqueueSyncOp(syncAction, 'expenses', savedExpense);
+    if (navigator.onLine) {
+      setSyncStatus('syncing');
+      pushExpenseToSupabase(syncAction, savedExpense).then(ok => {
+        if (ok) {
+          // Remove from queue since it succeeded
+          const q = loadSyncQueue();
+          saveSyncQueue(q.filter(op => !(op.table === 'expenses' && op.data?.id === savedExpense.id && op.action === syncAction)));
+          setSyncStatus('synced');
+        } else {
+          setSyncStatus('offline');
+        }
+      });
+    } else {
+      setSyncStatus('offline');
+    }
+  }
 
   // Offer template save for new non-recurring expenses
   if (!isEditing && currentType === 'expense' && savedExpense) {
@@ -844,11 +1435,31 @@ function promptDelete(id) {
 
 function confirmDelete() {
   if (!deleteTargetId) return;
+  const deletedExpense = expenses.find(e => e.id === deleteTargetId);
   expenses = expenses.filter(e => e.id !== deleteTargetId);
   const id = deleteTargetId;
   deleteTargetId = null;
   saveData();
   closeModal(document.getElementById('delete-overlay'));
+
+  // Sync deletion to Supabase
+  if (currentUser && deletedExpense) {
+    enqueueSyncOp('delete', 'expenses', deletedExpense);
+    if (navigator.onLine) {
+      setSyncStatus('syncing');
+      pushExpenseToSupabase('delete', deletedExpense).then(ok => {
+        if (ok) {
+          const q = loadSyncQueue();
+          saveSyncQueue(q.filter(op => !(op.table === 'expenses' && op.data?.id === deletedExpense.id && op.action === 'delete')));
+          setSyncStatus('synced');
+        } else {
+          setSyncStatus('offline');
+        }
+      });
+    } else {
+      setSyncStatus('offline');
+    }
+  }
 
   const item = document.querySelector(`.expense-item[data-id="${id}"]`);
   if (item) {
@@ -960,6 +1571,14 @@ function importJSON() {
       saveData();
       render();
       showToast(`✓ Imported ${added} transactions`);
+
+      // Sync newly imported items to Supabase
+      if (currentUser && added > 0 && supabase) {
+        const newIds = new Set(imported.filter(i => i.id).map(i => i.id));
+        const newExpenses = expenses.filter(e => newIds.has(e.id));
+        newExpenses.forEach(e => enqueueSyncOp('insert', 'expenses', e));
+        if (navigator.onLine) setTimeout(() => flushSyncQueue(), 300);
+      }
     } catch (err) {
       showToast('Import failed: invalid file');
     }
@@ -1381,6 +2000,20 @@ function addRecurringExpense(originalId) {
   const cat = CATEGORIES.find(c => c.id === original.category) || CATEGORIES[7];
   showToast(`${cat.icon} ${cat.name} recurring entry added`);
 
+  // Sync to Supabase
+  if (currentUser) {
+    enqueueSyncOp('insert', 'expenses', newEntry);
+    if (navigator.onLine) {
+      pushExpenseToSupabase('insert', newEntry).then(ok => {
+        if (ok) {
+          const q = loadSyncQueue();
+          saveSyncQueue(q.filter(op => !(op.table === 'expenses' && op.data?.id === newEntry.id)));
+          setSyncStatus('synced');
+        }
+      });
+    }
+  }
+
   // Remove the item from suggestion list
   const btn = document.querySelector(`.recurring-add-btn[data-recurring-id="${originalId}"]`);
   if (btn) {
@@ -1434,6 +2067,19 @@ function saveBudgetSettings() {
   saveBudgets();
   renderCategories();
   showToast('Budget limits saved ✓');
+
+  // Sync budgets to Supabase
+  if (currentUser && supabase && navigator.onLine) {
+    const budgetEntries = Object.entries(budgets);
+    if (budgetEntries.length > 0) {
+      const rows = budgetEntries.map(([category, monthly_limit]) => ({
+        user_id: currentUser.id,
+        category,
+        monthly_limit,
+      }));
+      supabase.from('budgets').upsert(rows, { onConflict: 'user_id,category' }).catch(() => {});
+    }
+  }
 }
 
 // ========================================
@@ -1454,9 +2100,84 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 // INIT
 // ========================================
 
-function init() {
+async function init() {
   loadData();
   applyTheme(theme);
+
+  // Initialize Supabase
+  initSupabase();
+  initOnlineListeners();
+
+  // Wire up Auth UI events
+  document.getElementById('auth-form')?.addEventListener('submit', handleAuthSubmit);
+  document.getElementById('auth-mode-toggle')?.addEventListener('click', () => {
+    setAuthMode(authMode === 'signin' ? 'signup' : (authMode === 'signup' ? 'signin' : 'signin'));
+  });
+  document.getElementById('auth-forgot')?.addEventListener('click', () => setAuthMode('forgot'));
+  document.getElementById('auth-guest')?.addEventListener('click', () => enterGuestMode());
+  document.getElementById('guest-banner-cta')?.addEventListener('click', () => {
+    setAuthMode('signup');
+    showAuthScreen();
+  });
+  document.getElementById('btn-logout')?.addEventListener('click', () => {
+    closeModal(document.getElementById('settings-overlay'));
+    setTimeout(() => signOut(), 300);
+  });
+
+  // Cloud import modal
+  document.getElementById('cloud-import-confirm')?.addEventListener('click', importLocalDataToCloud);
+  document.getElementById('cloud-import-skip')?.addEventListener('click', async () => {
+    const overlay = document.getElementById('cloud-import-overlay');
+    overlay?.classList.remove('open');
+    document.body.style.overflow = '';
+    // Still pull from cloud
+    await pullFromSupabase();
+    render();
+    setSyncStatus('synced');
+    flushSyncQueue();
+  });
+  document.getElementById('cloud-import-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+      e.currentTarget.classList.remove('open');
+      document.body.style.overflow = '';
+    }
+  });
+
+  // Check auth session
+  if (supabase) {
+    const { data: { session } } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+    if (session?.user) {
+      currentUser = session.user;
+      isGuestMode = false;
+      updateAccountUI();
+      await pullFromSupabase();
+      render();
+      setSyncStatus(navigator.onLine ? 'synced' : 'offline');
+      setTimeout(() => flushSyncQueue(), 1000);
+    } else {
+      // Check if guest mode
+      const wasGuest = localStorage.getItem(GUEST_MODE_KEY);
+      if (wasGuest) {
+        enterGuestMode();
+      } else {
+        showAuthScreen();
+      }
+    }
+
+    // Listen for auth state changes (e.g. email confirmation)
+    supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user && !currentUser) {
+        await onAuthSuccess(session.user, false);
+      } else if (event === 'SIGNED_OUT') {
+        currentUser = null;
+        updateAccountUI();
+        setSyncStatus('hidden');
+      }
+    });
+  } else {
+    // No Supabase — go straight to app (guest)
+    enterGuestMode();
+  }
 
   // Currency select
   const currSelect = document.getElementById('currency-select');
@@ -1677,10 +2398,16 @@ function init() {
     closeModal(document.getElementById('recurring-suggest-overlay')));
 
   // Clear all
-  document.getElementById('btn-clear-all').addEventListener('click', () => {
-    if (confirm('Delete ALL transactions? This cannot be undone.')) {
+  document.getElementById('btn-clear-all').addEventListener('click', async () => {
+    const confirmed = confirm(
+      currentUser
+        ? 'Delete ALL transactions locally? (Cloud data is preserved — sign out and back in to restore)'
+        : 'Delete ALL transactions? This cannot be undone.'
+    );
+    if (confirmed) {
       expenses = [];
       saveData();
+      localStorage.removeItem(SYNC_QUEUE_KEY);
       closeModal(document.getElementById('settings-overlay'));
       filterCategory = 'all';
       searchQuery    = '';
