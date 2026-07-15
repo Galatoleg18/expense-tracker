@@ -1,6 +1,6 @@
 // ========================================
 // ExpenseFlow — Premium Fintech App
-// Vanilla JS | No frameworks | v2.0
+// Vanilla JS | No frameworks | v3.0
 // ========================================
 
 // --- Categories (harmonious, modern palette) ---
@@ -15,6 +15,13 @@ const CATEGORIES = [
   { id: 'other',         name: 'Other',     icon: '📦', color: '#94a3b8' },
 ];
 
+// Recurring interval labels
+const RECURRING_LABELS = {
+  daily: '🔁 Daily',
+  weekly: '🔁 Weekly',
+  monthly: '🔁 Monthly',
+};
+
 // --- State ---
 let expenses        = [];
 let currentPeriod   = 'day';
@@ -28,10 +35,20 @@ let filterCategory  = 'all';
 let searchQuery     = '';
 let theme           = 'auto'; // 'light' | 'dark' | 'auto'
 let toastTimer      = null;
+let budgets         = {};        // { [categoryId]: number (monthly budget) }
+let templates       = [];        // [{ id, name, icon, amount, category, type }]
+let currentRecurring = null;     // null | 'daily' | 'weekly' | 'monthly'
+let lastOpenedDate  = null;      // ISO date string — for recurring suggestions
 
 // --- Storage Keys ---
-const STORAGE_KEY  = 'expenseflow_data';
-const SETTINGS_KEY = 'expenseflow_settings';
+const STORAGE_KEY       = 'expenseflow_data';
+const SETTINGS_KEY      = 'expenseflow_settings';
+const BUDGETS_KEY       = 'expenseflow_budgets';
+const TEMPLATES_KEY     = 'expenseflow_templates';
+const LAST_OPENED_KEY   = 'expenseflow_last_opened';
+
+// Data format version
+const DATA_VERSION = 1;
 
 // ========================================
 // DATA LAYER
@@ -40,7 +57,13 @@ const SETTINGS_KEY = 'expenseflow_settings';
 function loadData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    expenses = raw ? JSON.parse(raw) : [];
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Support both plain array (legacy) and versioned object
+      expenses = Array.isArray(parsed) ? parsed : (parsed.expenses || []);
+    } else {
+      expenses = [];
+    }
   } catch { expenses = []; }
 
   try {
@@ -48,14 +71,64 @@ function loadData() {
     if (s.currency) currency = s.currency;
     if (s.theme)    theme    = s.theme;
   } catch {}
+
+  try {
+    const b = JSON.parse(localStorage.getItem(BUDGETS_KEY) || '{}');
+    budgets = b;
+  } catch { budgets = {}; }
+
+  try {
+    const t = JSON.parse(localStorage.getItem(TEMPLATES_KEY) || '[]');
+    templates = Array.isArray(t) ? t : [];
+  } catch { templates = []; }
+
+  try {
+    lastOpenedDate = localStorage.getItem(LAST_OPENED_KEY);
+  } catch {}
 }
 
 function saveData() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(expenses));
+  const payload = {
+    version: DATA_VERSION,
+    exportedAt: new Date().toISOString(),
+    expenses,
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  checkBackupReminder();
 }
 
 function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ currency, theme }));
+}
+
+function saveBudgets() {
+  localStorage.setItem(BUDGETS_KEY, JSON.stringify(budgets));
+}
+
+function saveTemplates() {
+  localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates));
+}
+
+function saveLastOpened(dateStr) {
+  localStorage.setItem(LAST_OPENED_KEY, dateStr);
+  lastOpenedDate = dateStr;
+}
+
+// --- Auto-backup reminder ---
+let _backupReminderLastCount = null;
+function checkBackupReminder() {
+  const count = expenses.length;
+  if (count > 0 && count % 20 === 0 && count !== _backupReminderLastCount) {
+    _backupReminderLastCount = count;
+    setTimeout(() => {
+      showToastWithAction(
+        `💾 ${count} entries — consider exporting a backup!`,
+        'Export',
+        () => exportJSON(),
+        5000
+      );
+    }, 800);
+  }
 }
 
 // ========================================
@@ -72,7 +145,6 @@ function fmtISO(d) {
 
 function formatDate(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
-  const now = new Date();
   const diff = Math.round((new Date(dateStr + 'T00:00:00') - new Date(today() + 'T00:00:00')) / 86400000);
   if (diff === 0)  return 'Today';
   if (diff === -1) return 'Yesterday';
@@ -95,6 +167,7 @@ function getWeekRange(offset) {
   const day  = now.getDay();
   const start = new Date(now);
   start.setDate(now.getDate() - day + (offset * 7));
+  start.setHours(0,0,0,0);
   const end = new Date(start);
   end.setDate(start.getDate() + 6);
   return { start: fmtISO(start), end: fmtISO(end) };
@@ -183,7 +256,6 @@ function applyTheme(val) {
   } else {
     root.setAttribute('data-theme', val);
   }
-  // Update top-bar icons
   const isDark = root.getAttribute('data-theme') === 'dark';
   const lightIcon = document.getElementById('theme-icon-light');
   const darkIcon  = document.getElementById('theme-icon-dark');
@@ -191,7 +263,6 @@ function applyTheme(val) {
     lightIcon.style.display = isDark ? 'none'  : '';
     darkIcon.style.display  = isDark ? ''      : 'none';
   }
-  // Sync settings buttons
   document.querySelectorAll('.theme-switch-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.themeVal === val);
   });
@@ -206,9 +277,32 @@ function showToast(msg, duration = 2200) {
   const toast = document.getElementById('toast');
   if (!toast) return;
   if (toastTimer) clearTimeout(toastTimer);
+  // Remove any action button
+  toast.innerHTML = '';
   toast.textContent = msg;
+  toast.style.pointerEvents = 'none';
   toast.classList.add('visible');
   toastTimer = setTimeout(() => toast.classList.remove('visible'), duration);
+}
+
+function showToastWithAction(msg, actionLabel, actionFn, duration = 4000) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  if (toastTimer) clearTimeout(toastTimer);
+  toast.style.pointerEvents = 'auto';
+  toast.innerHTML = `
+    <span>${escapeHtml(msg)}</span>
+    <button class="toast-action-btn" style="margin-left:10px;padding:3px 10px;border:1px solid rgba(255,255,255,0.4);background:rgba(255,255,255,0.15);color:inherit;border-radius:99px;font-size:0.75rem;font-weight:700;cursor:pointer;">${escapeHtml(actionLabel)}</button>
+  `;
+  toast.classList.add('visible');
+  toast.querySelector('.toast-action-btn').addEventListener('click', () => {
+    toast.classList.remove('visible');
+    actionFn();
+  });
+  toastTimer = setTimeout(() => {
+    toast.classList.remove('visible');
+    toast.style.pointerEvents = 'none';
+  }, duration);
 }
 
 // ========================================
@@ -222,11 +316,10 @@ function render() {
   renderExpenseList();
 }
 
-// Animated number counter
 function animateValue(el, newText) {
   if (!el) return;
   el.classList.remove('animating');
-  void el.offsetWidth; // reflow
+  void el.offsetWidth;
   el.textContent = newText;
   el.classList.add('animating');
 }
@@ -252,7 +345,6 @@ function renderSummary() {
   document.getElementById('summary-meta').textContent =
     `${count} transaction${count !== 1 ? 's' : ''}`;
 
-  // Update currency displays
   document.querySelectorAll('.currency-symbol').forEach(el => el.textContent = currency);
 }
 
@@ -260,7 +352,6 @@ function renderFilterPills() {
   const container = document.getElementById('filter-row');
   if (!container) return;
 
-  // Which categories exist in current period (ignoring cat/search filters)
   let periodExp;
   if (currentPeriod === 'day') {
     const d = getDayDate(periodOffset);
@@ -284,7 +375,6 @@ function renderFilterPills() {
 }
 
 function renderCategories() {
-  // Use period-only expenses (not search/cat filtered) for breakdown
   let periodExp;
   if (currentPeriod === 'day') {
     const d = getDayDate(periodOffset);
@@ -297,7 +387,6 @@ function renderCategories() {
     periodExp = expenses.filter(e => e.date >= r.start && e.date <= r.end);
   }
 
-  // Only expenses (not income) for breakdown
   const expensesOnly = periodExp.filter(e => e.type !== 'income');
   const total = expensesOnly.reduce((s, e) => s + e.amount, 0);
   const section = document.getElementById('category-section');
@@ -315,14 +404,41 @@ function renderCategories() {
 
   const sorted = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
 
-  // Draw donut chart
   drawDonut(sorted, total);
 
-  // Render bars
+  // Get current month budget spending for budget progress
+  const currentMonthRange = getMonthRange(0);
+  const monthExpenses = expenses.filter(e =>
+    e.type !== 'income' &&
+    e.date >= currentMonthRange.start &&
+    e.date <= currentMonthRange.end
+  );
+  const monthByCat = {};
+  monthExpenses.forEach(e => {
+    monthByCat[e.category] = (monthByCat[e.category] || 0) + e.amount;
+  });
+
   const container = document.getElementById('category-bars');
   container.innerHTML = sorted.map(([catId, amount]) => {
     const cat = CATEGORIES.find(c => c.id === catId) || CATEGORIES[7];
     const pct = total > 0 ? (amount / total) * 100 : 0;
+
+    // Budget bar (if budget set)
+    const budget = budgets[catId];
+    const monthSpent = monthByCat[catId] || 0;
+    let budgetHtml = '';
+    if (budget && budget > 0) {
+      const budgetPct = Math.min((monthSpent / budget) * 100, 100);
+      const budgetColor = budgetPct >= 100 ? 'var(--expense)' : budgetPct >= 80 ? '#f59e0b' : 'var(--income)';
+      budgetHtml = `
+        <div class="budget-bar-wrap" title="Monthly budget: ${formatMoney(budget)}">
+          <div class="budget-bar-track">
+            <div class="budget-bar-fill" style="width:0%;background:${budgetColor}" data-width="${budgetPct}"></div>
+          </div>
+          <span class="budget-bar-label" style="color:${budgetColor}">${Math.round(budgetPct)}% of budget</span>
+        </div>`;
+    }
+
     return `
       <div class="cat-bar-row" data-cat="${catId}">
         <span class="cat-bar-icon">${cat.icon}</span>
@@ -334,13 +450,16 @@ function renderCategories() {
           <div class="cat-bar-track">
             <div class="cat-bar-fill" style="width:0%;background:${cat.color}" data-width="${pct}"></div>
           </div>
+          ${budgetHtml}
         </div>
       </div>`;
   }).join('');
 
-  // Animate bars after paint
   requestAnimationFrame(() => {
     container.querySelectorAll('.cat-bar-fill').forEach(bar => {
+      bar.style.width = bar.dataset.width + '%';
+    });
+    container.querySelectorAll('.budget-bar-fill').forEach(bar => {
       bar.style.width = bar.dataset.width + '%';
     });
   });
@@ -360,7 +479,7 @@ function drawDonut(sorted, total) {
   const cy = size / 2;
   const outer = size / 2 - 4;
   const inner = outer * 0.58;
-  const gap   = 0.025; // radians gap between segments
+  const gap   = 0.025;
 
   if (total === 0) {
     ctx.beginPath();
@@ -420,6 +539,9 @@ function renderExpenseList() {
     const isIncome = e.type === 'income';
     const sign = isIncome ? '+' : '-';
     const amountClass = isIncome ? 'is-income' : 'is-expense';
+    const recurringBadge = e.recurring
+      ? `<span class="recurring-badge" title="${RECURRING_LABELS[e.recurring] || 'Recurring'}">🔁</span>`
+      : '';
 
     if (showDateHeaders && e.date !== lastDate) {
       lastDate = e.date;
@@ -432,7 +554,7 @@ function renderExpenseList() {
           ${cat.icon}
         </div>
         <div class="expense-info">
-          <div class="expense-category">${cat.name}${isIncome ? ' <span style="font-size:0.65rem;background:var(--income-soft);color:var(--income);padding:1px 5px;border-radius:4px;font-weight:600;vertical-align:middle">Income</span>' : ''}</div>
+          <div class="expense-category">${cat.name}${recurringBadge}${isIncome ? ' <span style="font-size:0.65rem;background:var(--income-soft);color:var(--income);padding:1px 5px;border-radius:4px;font-weight:600;vertical-align:middle">Income</span>' : ''}</div>
           ${e.description ? `<div class="expense-desc">${escapeHtml(e.description)}</div>` : ''}
         </div>
         <div class="expense-right">
@@ -475,13 +597,80 @@ function renderCategoryGrid() {
 }
 
 // ========================================
+// TEMPLATES
+// ========================================
+
+function renderTemplates() {
+  const container = document.getElementById('template-quick-adds');
+  if (!container) return;
+  if (templates.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = '';
+  container.innerHTML = `
+    <div class="template-label">Quick Add</div>
+    <div class="template-scroll">
+      ${templates.map(t => `
+        <button type="button" class="template-chip" data-tpl-id="${t.id}">
+          <span>${t.icon || '⚡'}</span>
+          <span class="tpl-name">${escapeHtml(t.name)}</span>
+          <span class="tpl-amount">${currency}${parseFloat(t.amount).toFixed(2)}</span>
+        </button>
+      `).join('')}
+    </div>`;
+}
+
+function applyTemplate(tplId) {
+  const tpl = templates.find(t => t.id === tplId);
+  if (!tpl) return;
+  currentType      = tpl.type || 'expense';
+  selectedCategory = tpl.category;
+  document.getElementById('expense-amount').value = tpl.amount;
+  document.getElementById('expense-desc').value   = tpl.name;
+  syncTypeToggle();
+  renderCategoryGrid();
+  renderTemplates();
+}
+
+function offerSaveTemplate(expense) {
+  const cat = CATEGORIES.find(c => c.id === expense.category) || CATEGORIES[7];
+  showToastWithAction(
+    `Save "${cat.name}" as template?`,
+    'Save',
+    () => {
+      const name = expense.description || cat.name;
+      const existing = templates.find(t =>
+        t.category === expense.category &&
+        t.amount === expense.amount &&
+        t.name === name
+      );
+      if (!existing) {
+        templates.push({
+          id: generateId(),
+          name,
+          icon: cat.icon,
+          amount: expense.amount,
+          category: expense.category,
+          type: expense.type || 'expense',
+        });
+        saveTemplates();
+        showToast(`Template saved: ${cat.icon} ${name}`);
+      } else {
+        showToast('Template already exists');
+      }
+    },
+    4000
+  );
+}
+
+// ========================================
 // MODAL CONTROLS
 // ========================================
 
 function openModal(overlay) {
   overlay.classList.add('open');
   document.body.style.overflow = 'hidden';
-  // Trap focus
   const firstFocusable = overlay.querySelector('button, input, select, [tabindex]:not([tabindex="-1"])');
   if (firstFocusable) setTimeout(() => firstFocusable.focus(), 350);
 }
@@ -495,6 +684,7 @@ function openAddModal() {
   editingId        = null;
   selectedCategory = null;
   currentType      = 'expense';
+  currentRecurring = null;
 
   document.getElementById('modal-title').textContent = 'Add Transaction';
   document.getElementById('expense-form').reset();
@@ -505,7 +695,9 @@ function openAddModal() {
     Save`;
 
   syncTypeToggle();
+  syncRecurringToggle();
   renderCategoryGrid();
+  renderTemplates();
   openModal(document.getElementById('modal-overlay'));
   setTimeout(() => document.getElementById('expense-amount').focus(), 350);
 }
@@ -517,6 +709,7 @@ function openEditModal(id) {
   editingId        = id;
   selectedCategory = expense.category;
   currentType      = expense.type || 'expense';
+  currentRecurring = expense.recurring || null;
 
   document.getElementById('modal-title').textContent = 'Edit Transaction';
   document.getElementById('expense-id').value          = id;
@@ -528,7 +721,9 @@ function openEditModal(id) {
     Update`;
 
   syncTypeToggle();
+  syncRecurringToggle();
   renderCategoryGrid();
+  renderTemplates();
   openModal(document.getElementById('modal-overlay'));
 }
 
@@ -540,6 +735,12 @@ function syncTypeToggle() {
   if (wrap) {
     wrap.classList.toggle('is-income', currentType === 'income');
   }
+}
+
+function syncRecurringToggle() {
+  document.querySelectorAll('.recurring-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.recurring === (currentRecurring || 'none'));
+  });
 }
 
 // ========================================
@@ -572,22 +773,34 @@ function handleSave(e) {
   }
 
   const isEditing = !!editingId;
+  let savedExpense;
 
   if (isEditing) {
     const idx = expenses.findIndex(ex => ex.id === editingId);
     if (idx !== -1) {
-      expenses[idx] = { ...expenses[idx], amount, category: selectedCategory, date, description, type: currentType };
+      expenses[idx] = {
+        ...expenses[idx],
+        amount,
+        category: selectedCategory,
+        date,
+        description,
+        type: currentType,
+        recurring: currentRecurring || null,
+      };
+      savedExpense = expenses[idx];
     }
   } else {
-    expenses.push({
+    savedExpense = {
       id: generateId(),
       amount,
       category:    selectedCategory,
       date,
       description,
       type:        currentType,
+      recurring:   currentRecurring || null,
       createdAt:   Date.now(),
-    });
+    };
+    expenses.push(savedExpense);
   }
 
   saveData();
@@ -595,10 +808,20 @@ function handleSave(e) {
   render();
 
   const cat = CATEGORIES.find(c => c.id === selectedCategory) || CATEGORIES[7];
-  showToast(isEditing
+  const toastMsg = isEditing
     ? `${cat.icon} Transaction updated`
-    : `${cat.icon} ${currentType === 'income' ? 'Income' : 'Expense'} added · ${formatMoney(amount)}`
-  );
+    : `${cat.icon} ${currentType === 'income' ? 'Income' : 'Expense'} added · ${formatMoney(amount)}`;
+  showToast(toastMsg);
+
+  // Offer template save for new non-recurring expenses
+  if (!isEditing && currentType === 'expense' && savedExpense) {
+    setTimeout(() => offerSaveTemplate(savedExpense), 2500);
+  }
+
+  // Check budget warnings
+  if (!isEditing && currentType === 'expense') {
+    checkBudgetWarning(selectedCategory);
+  }
 }
 
 function shakeElement(el) {
@@ -627,7 +850,6 @@ function confirmDelete() {
   saveData();
   closeModal(document.getElementById('delete-overlay'));
 
-  // Animate out the item
   const item = document.querySelector(`.expense-item[data-id="${id}"]`);
   if (item) {
     item.style.transition = 'transform 0.2s ease, opacity 0.2s ease, max-height 0.3s ease';
@@ -646,7 +868,107 @@ function confirmDelete() {
 }
 
 // ========================================
-// CSV EXPORT
+// BUDGET WARNINGS
+// ========================================
+
+function checkBudgetWarning(categoryId) {
+  const budget = budgets[categoryId];
+  if (!budget || budget <= 0) return;
+
+  const r = getMonthRange(0);
+  const monthSpent = expenses
+    .filter(e => e.type !== 'income' && e.category === categoryId && e.date >= r.start && e.date <= r.end)
+    .reduce((s, e) => s + e.amount, 0);
+
+  const cat = CATEGORIES.find(c => c.id === categoryId) || CATEGORIES[7];
+  const pct = (monthSpent / budget) * 100;
+
+  if (pct >= 100) {
+    setTimeout(() => showToast(`🚨 ${cat.name} budget exceeded! ${formatMoney(monthSpent)} / ${formatMoney(budget)}`, 3500), 300);
+  } else if (pct >= 80) {
+    setTimeout(() => showToast(`⚠️ ${cat.name} at ${Math.round(pct)}% of monthly budget`, 3000), 300);
+  }
+}
+
+// ========================================
+// JSON IMPORT / EXPORT
+// ========================================
+
+function exportJSON() {
+  const payload = {
+    version: DATA_VERSION,
+    exportedAt: new Date().toISOString(),
+    app: 'ExpenseFlow',
+    expenses,
+    budgets,
+    templates,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `expenseflow-backup-${today()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Backup exported ✓');
+}
+
+function importJSON() {
+  const input = document.createElement('input');
+  input.type   = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text    = await file.text();
+      const parsed  = JSON.parse(text);
+      const imported = Array.isArray(parsed) ? parsed : (parsed.expenses || []);
+
+      if (!Array.isArray(imported)) throw new Error('Invalid format');
+
+      const confirmed = confirm(
+        `Import ${imported.length} transactions?\n\nThis will MERGE with your existing data (duplicates by ID are skipped).`
+      );
+      if (!confirmed) return;
+
+      // Merge by ID
+      const existingIds = new Set(expenses.map(e => e.id));
+      let added = 0;
+      imported.forEach(item => {
+        if (item.id && !existingIds.has(item.id)) {
+          expenses.push(item);
+          added++;
+        }
+      });
+
+      // Import budgets if present
+      if (parsed.budgets && typeof parsed.budgets === 'object') {
+        Object.assign(budgets, parsed.budgets);
+        saveBudgets();
+      }
+
+      // Import templates if present
+      if (parsed.templates && Array.isArray(parsed.templates)) {
+        const existingTplIds = new Set(templates.map(t => t.id));
+        parsed.templates.forEach(t => {
+          if (t.id && !existingTplIds.has(t.id)) templates.push(t);
+        });
+        saveTemplates();
+      }
+
+      saveData();
+      render();
+      showToast(`✓ Imported ${added} transactions`);
+    } catch (err) {
+      showToast('Import failed: invalid file');
+    }
+  };
+  input.click();
+}
+
+// ========================================
+// CSV EXPORT (legacy - kept for Settings)
 // ========================================
 
 function exportCSV() {
@@ -654,23 +976,464 @@ function exportCSV() {
     showToast('No data to export');
     return;
   }
-  const header = 'Date,Type,Category,Amount,Description\n';
-  const rows = expenses
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map(e => {
-      const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[7];
-      return `${e.date},${e.type || 'expense'},${cat.name},${e.amount},"${(e.description || '').replace(/"/g, '""')}"`;
-    })
-    .join('\n');
+  openReportModal();
+}
 
-  const blob = new Blob([header + rows], { type: 'text/csv' });
+// ========================================
+// REPORT GENERATOR
+// ========================================
+
+let reportDateFrom  = '';
+let reportDateTo    = '';
+let reportPreset    = 'month';
+
+function openReportModal() {
+  // Set defaults
+  const now = new Date();
+  const r   = getMonthRange(0);
+  reportDateFrom = r.start;
+  reportDateTo   = r.end;
+  reportPreset   = 'month';
+
+  const overlay = document.getElementById('report-overlay');
+  if (!overlay) return;
+
+  const fromEl = overlay.querySelector('#report-from');
+  const toEl   = overlay.querySelector('#report-to');
+  if (fromEl) fromEl.value = reportDateFrom;
+  if (toEl)   toEl.value   = reportDateTo;
+
+  // Highlight active preset
+  syncReportPresets();
+  renderReportPreview();
+
+  openModal(overlay);
+}
+
+function syncReportPresets() {
+  const overlay = document.getElementById('report-overlay');
+  if (!overlay) return;
+  overlay.querySelectorAll('.report-preset-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.preset === reportPreset);
+  });
+}
+
+function applyReportPreset(preset) {
+  reportPreset = preset;
+  const now = new Date();
+  let from, to;
+
+  if (preset === 'week') {
+    const r = getWeekRange(0);
+    from = r.start; to = r.end;
+  } else if (preset === 'month') {
+    const r = getMonthRange(0);
+    from = r.start; to = r.end;
+  } else if (preset === 'last_month') {
+    const r = getMonthRange(-1);
+    from = r.start; to = r.end;
+  } else if (preset === '3months') {
+    const r3 = getMonthRange(-2);
+    const rNow = getMonthRange(0);
+    from = r3.start; to = rNow.end;
+  } else if (preset === 'all') {
+    if (expenses.length === 0) { from = today(); to = today(); }
+    else {
+      const dates = expenses.map(e => e.date).sort();
+      from = dates[0]; to = dates[dates.length - 1];
+    }
+  }
+
+  reportDateFrom = from;
+  reportDateTo   = to;
+
+  const overlay = document.getElementById('report-overlay');
+  if (!overlay) return;
+  const fromEl = overlay.querySelector('#report-from');
+  const toEl   = overlay.querySelector('#report-to');
+  if (fromEl) fromEl.value = from;
+  if (toEl)   toEl.value   = to;
+
+  syncReportPresets();
+  renderReportPreview();
+}
+
+function getReportExpenses() {
+  return expenses.filter(e => e.date >= reportDateFrom && e.date <= reportDateTo);
+}
+
+function renderReportPreview() {
+  const data = getReportExpenses();
+  const container = document.getElementById('report-preview-body');
+  if (!container) return;
+
+  const expOnly  = data.filter(e => e.type !== 'income');
+  const incOnly  = data.filter(e => e.type === 'income');
+  const totalExp = expOnly.reduce((s, e) => s + e.amount, 0);
+  const totalInc = incOnly.reduce((s, e) => s + e.amount, 0);
+  const balance  = totalInc - totalExp;
+
+  // Daily average
+  const days = data.length > 0
+    ? Math.max(1, Math.round((new Date(reportDateTo) - new Date(reportDateFrom)) / 86400000) + 1)
+    : 1;
+  const dailyAvg = totalExp / days;
+
+  // Category summary
+  const byCat = {};
+  expOnly.forEach(e => { byCat[e.category] = (byCat[e.category] || 0) + e.amount; });
+  const sortedCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const topCat = sortedCats[0];
+
+  // Biggest expense
+  let biggestExp = null;
+  if (expOnly.length > 0) {
+    biggestExp = expOnly.reduce((max, e) => e.amount > max.amount ? e : max, expOnly[0]);
+  }
+
+  if (data.length === 0) {
+    container.innerHTML = `<p class="report-empty">No transactions in this period.</p>`;
+    return;
+  }
+
+  const topCatInfo = topCat ? CATEGORIES.find(c => c.id === topCat[0]) : null;
+
+  container.innerHTML = `
+    <div class="report-stats-grid">
+      <div class="report-stat">
+        <div class="report-stat-label">Total Spent</div>
+        <div class="report-stat-val expense-color">${formatMoney(totalExp)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Total Income</div>
+        <div class="report-stat-val income-color">${formatMoney(totalInc)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Balance</div>
+        <div class="report-stat-val ${balance >= 0 ? 'income-color' : 'expense-color'}">${balance >= 0 ? '+' : ''}${formatMoney(balance)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Daily Average</div>
+        <div class="report-stat-val">${formatMoney(dailyAvg)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Transactions</div>
+        <div class="report-stat-val">${data.length}</div>
+      </div>
+      ${topCatInfo ? `<div class="report-stat">
+        <div class="report-stat-label">Top Category</div>
+        <div class="report-stat-val">${topCatInfo.icon} ${topCatInfo.name}</div>
+      </div>` : ''}
+    </div>
+    ${biggestExp ? `<div class="report-insight">💡 Biggest expense: ${formatMoney(biggestExp.amount)} on ${formatDate(biggestExp.date)}</div>` : ''}
+    ${sortedCats.length > 0 ? `
+    <div class="report-cat-summary">
+      <div class="report-section-title">Category Breakdown</div>
+      ${sortedCats.slice(0, 5).map(([catId, amt]) => {
+        const cat = CATEGORIES.find(c => c.id === catId) || CATEGORIES[7];
+        const pct = totalExp > 0 ? Math.round((amt / totalExp) * 100) : 0;
+        return `<div class="report-cat-row">
+          <span>${cat.icon} ${cat.name}</span>
+          <span>${formatMoney(amt)} (${pct}%)</span>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+  `;
+}
+
+function exportReportCSV() {
+  const data = getReportExpenses();
+  if (data.length === 0) {
+    showToast('No transactions in selected range');
+    return;
+  }
+
+  const expOnly  = data.filter(e => e.type !== 'income');
+  const incOnly  = data.filter(e => e.type === 'income');
+  const totalExp = expOnly.reduce((s, e) => s + e.amount, 0);
+  const totalInc = incOnly.reduce((s, e) => s + e.amount, 0);
+  const balance  = totalInc - totalExp;
+
+  const days = Math.max(1, Math.round((new Date(reportDateTo) - new Date(reportDateFrom)) / 86400000) + 1);
+  const dailyAvg = totalExp / days;
+
+  const byCat = {};
+  expOnly.forEach(e => { byCat[e.category] = (byCat[e.category] || 0) + e.amount; });
+
+  let csv = '';
+
+  // Header section
+  csv += `ExpenseFlow Report\n`;
+  csv += `Period,${reportDateFrom} to ${reportDateTo}\n`;
+  csv += `Total Spent,${totalExp.toFixed(2)}\n`;
+  csv += `Total Income,${totalInc.toFixed(2)}\n`;
+  csv += `Balance,${balance.toFixed(2)}\n`;
+  csv += `Daily Average,${dailyAvg.toFixed(2)}\n`;
+  csv += `Transactions,${data.length}\n\n`;
+
+  // Transactions
+  csv += `Date,Type,Category,Amount,Description,Recurring\n`;
+  [...data].sort((a, b) => a.date.localeCompare(b.date)).forEach(e => {
+    const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[7];
+    csv += `${e.date},${e.type || 'expense'},${cat.name},${e.amount},"${(e.description || '').replace(/"/g, '""')}",${e.recurring || ''}\n`;
+  });
+
+  // Category summary
+  csv += `\nCategory Summary\n`;
+  csv += `Category,Amount,Percentage\n`;
+  Object.entries(byCat).sort((a, b) => b[1] - a[1]).forEach(([catId, amt]) => {
+    const cat = CATEGORIES.find(c => c.id === catId) || CATEGORIES[7];
+    const pct = totalExp > 0 ? ((amt / totalExp) * 100).toFixed(1) : '0';
+    csv += `${cat.name},${amt.toFixed(2)},${pct}%\n`;
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `expenseflow-${today()}.csv`;
+  a.download = `expenseflow-report-${reportDateFrom}-${reportDateTo}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-  showToast('CSV exported ✓');
+  showToast('Report exported ✓');
+  closeModal(document.getElementById('report-overlay'));
+}
+
+// ========================================
+// SPENDING INSIGHTS
+// ========================================
+
+function openInsightsModal() {
+  const overlay = document.getElementById('insights-overlay');
+  if (!overlay) return;
+  renderInsights();
+  openModal(overlay);
+}
+
+function renderInsights() {
+  const container = document.getElementById('insights-body');
+  if (!container) return;
+
+  const todayStr = today();
+  const r = getMonthRange(0);
+  const rPrev = getMonthRange(-1);
+  const rWeek = getWeekRange(0);
+  const rPrevWeek = getWeekRange(-1);
+
+  const thisMonthExp = expenses.filter(e => e.type !== 'income' && e.date >= r.start && e.date <= r.end);
+  const prevMonthExp = expenses.filter(e => e.type !== 'income' && e.date >= rPrev.start && e.date <= rPrev.end);
+  const thisWeekExp  = expenses.filter(e => e.type !== 'income' && e.date >= rWeek.start && e.date <= rWeek.end);
+  const prevWeekExp  = expenses.filter(e => e.type !== 'income' && e.date >= rPrevWeek.start && e.date <= rPrevWeek.end);
+
+  const thisMonthTotal = thisMonthExp.reduce((s, e) => s + e.amount, 0);
+  const prevMonthTotal = prevMonthExp.reduce((s, e) => s + e.amount, 0);
+  const thisWeekTotal  = thisWeekExp.reduce((s, e) => s + e.amount, 0);
+
+  // Daily average this month
+  const daysElapsed = new Date(todayStr).getDate();
+  const dailyAvg = thisMonthTotal / Math.max(1, daysElapsed);
+
+  // Top category this month
+  const byCat = {};
+  thisMonthExp.forEach(e => { byCat[e.category] = (byCat[e.category] || 0) + e.amount; });
+  const sortedCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const topCat = sortedCats[0] ? CATEGORIES.find(c => c.id === sortedCats[0][0]) : null;
+
+  // Biggest expense ever
+  const allExpenses = expenses.filter(e => e.type !== 'income');
+  const biggest = allExpenses.length > 0
+    ? allExpenses.reduce((max, e) => e.amount > max.amount ? e : max, allExpenses[0])
+    : null;
+  const biggestCat = biggest ? CATEGORIES.find(c => c.id === biggest.category) : null;
+
+  // Spending streak (consecutive days with expense logged)
+  const expDays = new Set(expenses.map(e => e.date));
+  let streak = 0;
+  const checkDate = new Date();
+  while (true) {
+    const d = fmtISO(checkDate);
+    if (expDays.has(d)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
+    else break;
+    if (streak > 365) break;
+  }
+
+  // Category comparison week vs prev week (food as example)
+  const weekCatComparisons = [];
+  CATEGORIES.forEach(cat => {
+    const thisW = thisWeekExp.filter(e => e.category === cat.id).reduce((s, e) => s + e.amount, 0);
+    const prevW = prevWeekExp.filter(e => e.category === cat.id).reduce((s, e) => s + e.amount, 0);
+    if (thisW > 0 || prevW > 0) {
+      weekCatComparisons.push({ cat, thisW, prevW });
+    }
+  });
+  weekCatComparisons.sort((a, b) => b.thisW - a.thisW);
+  const topWeekCat = weekCatComparisons[0];
+
+  const insights = [];
+
+  if (topWeekCat && topWeekCat.prevW > 0) {
+    const diff = ((topWeekCat.thisW - topWeekCat.prevW) / topWeekCat.prevW) * 100;
+    const dir = diff > 0 ? 'more' : 'less';
+    const icon = diff > 0 ? '📈' : '📉';
+    insights.push(`${icon} You spent <strong>${Math.abs(Math.round(diff))}% ${dir}</strong> on ${topWeekCat.cat.icon} ${topWeekCat.cat.name} this week vs last week`);
+  } else if (topWeekCat) {
+    insights.push(`📊 Top category this week: ${topWeekCat.cat.icon} ${topWeekCat.cat.name} (${formatMoney(topWeekCat.thisW)})`);
+  }
+
+  if (topCat) {
+    insights.push(`🏆 Your top category this month is <strong>${topCat.icon} ${topCat.name}</strong> (${formatMoney(sortedCats[0][1])})`);
+  }
+
+  if (thisMonthTotal > 0) {
+    insights.push(`📅 Daily average this month: <strong>${formatMoney(dailyAvg)}</strong>`);
+  }
+
+  if (biggest && biggestCat) {
+    insights.push(`💸 Biggest expense: <strong>${formatMoney(biggest.amount)}</strong> on ${biggestCat.icon} ${biggestCat.name} (${formatDate(biggest.date)})`);
+  }
+
+  if (prevMonthTotal > 0 && thisMonthTotal > 0) {
+    const mDiff = ((thisMonthTotal - prevMonthTotal) / prevMonthTotal) * 100;
+    const mDir = mDiff > 0 ? 'more' : 'less';
+    const mIcon = mDiff > 0 ? '⬆️' : '⬇️';
+    insights.push(`${mIcon} You're spending <strong>${Math.abs(Math.round(mDiff))}% ${mDir}</strong> this month vs last month`);
+  }
+
+  if (streak > 0) {
+    insights.push(`🔥 You've logged expenses for <strong>${streak} day${streak !== 1 ? 's' : ''} in a row</strong>!`);
+  }
+
+  if (expenses.length === 0) {
+    container.innerHTML = `<p class="insights-empty">No data yet — start adding transactions to see insights!</p>`;
+    return;
+  }
+
+  container.innerHTML = insights.map(text => `
+    <div class="insight-item">${text}</div>
+  `).join('') || `<p class="insights-empty">Keep adding transactions — insights will appear soon!</p>`;
+}
+
+// ========================================
+// RECURRING EXPENSES
+// ========================================
+
+function checkRecurringSuggestions() {
+  const todayStr = today();
+  if (lastOpenedDate === todayStr) return; // already checked today
+
+  saveLastOpened(todayStr);
+
+  const recurringExpenses = expenses.filter(e => e.recurring);
+  if (recurringExpenses.length === 0) return;
+
+  const suggestions = [];
+  recurringExpenses.forEach(e => {
+    const lastDate = new Date(e.date + 'T00:00:00');
+    const todayDate = new Date(todayStr + 'T00:00:00');
+    const daysDiff = Math.round((todayDate - lastDate) / 86400000);
+
+    let shouldSuggest = false;
+    if (e.recurring === 'daily'   && daysDiff >= 1) shouldSuggest = true;
+    if (e.recurring === 'weekly'  && daysDiff >= 7) shouldSuggest = true;
+    if (e.recurring === 'monthly' && daysDiff >= 28) shouldSuggest = true;
+
+    if (shouldSuggest) {
+      const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[7];
+      suggestions.push({ expense: e, cat });
+    }
+  });
+
+  if (suggestions.length === 0) return;
+
+  const overlay = document.getElementById('recurring-suggest-overlay');
+  if (!overlay) return;
+
+  const body = overlay.querySelector('#recurring-suggest-body');
+  if (body) {
+    body.innerHTML = suggestions.map(({ expense: e, cat }) => `
+      <div class="recurring-suggest-item" data-recurring-id="${e.id}">
+        <div class="recurring-suggest-icon" style="background:${cat.color}18;color:${cat.color}">${cat.icon}</div>
+        <div class="recurring-suggest-info">
+          <div class="recurring-suggest-name">${cat.name}${e.description ? ` — ${escapeHtml(e.description)}` : ''}</div>
+          <div class="recurring-suggest-meta">${RECURRING_LABELS[e.recurring] || 'Recurring'} · ${formatMoney(e.amount)}</div>
+        </div>
+        <button class="btn btn-sm btn-primary recurring-add-btn" data-recurring-id="${e.id}">Add</button>
+      </div>
+    `).join('');
+  }
+
+  openModal(overlay);
+}
+
+function addRecurringExpense(originalId) {
+  const original = expenses.find(e => e.id === originalId);
+  if (!original) return;
+
+  const newEntry = {
+    ...original,
+    id: generateId(),
+    date: today(),
+    createdAt: Date.now(),
+  };
+  expenses.push(newEntry);
+  saveData();
+  render();
+
+  const cat = CATEGORIES.find(c => c.id === original.category) || CATEGORIES[7];
+  showToast(`${cat.icon} ${cat.name} recurring entry added`);
+
+  // Remove the item from suggestion list
+  const btn = document.querySelector(`.recurring-add-btn[data-recurring-id="${originalId}"]`);
+  if (btn) {
+    const item = btn.closest('.recurring-suggest-item');
+    if (item) item.remove();
+
+    const body = document.getElementById('recurring-suggest-body');
+    if (body && body.children.length === 0) {
+      closeModal(document.getElementById('recurring-suggest-overlay'));
+    }
+  }
+}
+
+// ========================================
+// BUDGET SETTINGS
+// ========================================
+
+function renderBudgetSettings() {
+  const container = document.getElementById('budget-settings-body');
+  if (!container) return;
+
+  container.innerHTML = CATEGORIES.filter(cat => cat.id !== 'other').map(cat => {
+    const budgetVal = budgets[cat.id] || '';
+    return `
+      <div class="budget-row">
+        <div class="budget-row-cat">
+          <span class="budget-cat-icon">${cat.icon}</span>
+          <span class="budget-cat-name">${cat.name}</span>
+        </div>
+        <div class="budget-input-wrap">
+          <span class="budget-currency">${currency}</span>
+          <input type="number" class="budget-input" data-cat-id="${cat.id}"
+            value="${budgetVal}" placeholder="No limit" min="0" step="1"
+            inputmode="decimal" />
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function saveBudgetSettings() {
+  const inputs = document.querySelectorAll('.budget-input');
+  inputs.forEach(input => {
+    const catId = input.dataset.catId;
+    const val   = parseFloat(input.value);
+    if (val > 0) {
+      budgets[catId] = val;
+    } else {
+      delete budgets[catId];
+    }
+  });
+  saveBudgets();
+  renderCategories();
+  showToast('Budget limits saved ✓');
 }
 
 // ========================================
@@ -683,7 +1446,6 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => renderCategories(), 200);
 });
 
-// System theme change
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (theme === 'auto') applyTheme('auto');
 });
@@ -694,8 +1456,6 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 
 function init() {
   loadData();
-
-  // Apply theme
   applyTheme(theme);
 
   // Currency select
@@ -732,22 +1492,16 @@ function init() {
     tab.addEventListener('click', () => {
       document.querySelector('.tab.active').classList.remove('active');
       tab.classList.add('active');
-      currentPeriod = tab.dataset.period;
-      periodOffset  = 0;
+      currentPeriod  = tab.dataset.period;
+      periodOffset   = 0;
       filterCategory = 'all';
       render();
     });
   });
 
   // Period nav
-  document.getElementById('period-prev').addEventListener('click', () => {
-    periodOffset--;
-    render();
-  });
-  document.getElementById('period-next').addEventListener('click', () => {
-    periodOffset++;
-    render();
-  });
+  document.getElementById('period-prev').addEventListener('click', () => { periodOffset--; render(); });
+  document.getElementById('period-next').addEventListener('click', () => { periodOffset++; render(); });
 
   // Type toggle (income/expense)
   document.querySelectorAll('.type-btn').forEach(btn => {
@@ -757,12 +1511,27 @@ function init() {
     });
   });
 
+  // Recurring toggle
+  document.querySelectorAll('.recurring-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const val = btn.dataset.recurring;
+      currentRecurring = (val === 'none' || currentRecurring === val) ? null : val;
+      syncRecurringToggle();
+    });
+  });
+
   // Category selection in form
   document.getElementById('category-grid').addEventListener('click', (e) => {
     const btn = e.target.closest('.cat-btn');
     if (!btn) return;
     selectedCategory = btn.dataset.cat;
     renderCategoryGrid();
+  });
+
+  // Template quick-add delegation
+  document.getElementById('expense-form').addEventListener('click', (e) => {
+    const chip = e.target.closest('.template-chip');
+    if (chip) applyTemplate(chip.dataset.tplId);
   });
 
   // Category bar rows — filter on click
@@ -819,7 +1588,95 @@ function init() {
   document.getElementById('settings-overlay').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeModal(e.currentTarget);
   });
+
+  // Export CSV (now opens Report Generator)
   document.getElementById('btn-export').addEventListener('click', exportCSV);
+
+  // Export JSON
+  document.getElementById('btn-export-json')?.addEventListener('click', exportJSON);
+
+  // Import JSON
+  document.getElementById('btn-import-json')?.addEventListener('click', importJSON);
+
+  // Budget settings button
+  document.getElementById('btn-budget-settings')?.addEventListener('click', () => {
+    renderBudgetSettings();
+    closeModal(document.getElementById('settings-overlay'));
+    openModal(document.getElementById('budget-overlay'));
+  });
+
+  // Save budget
+  document.getElementById('btn-save-budgets')?.addEventListener('click', () => {
+    saveBudgetSettings();
+    closeModal(document.getElementById('budget-overlay'));
+  });
+
+  // Budget modal close
+  document.getElementById('budget-close')?.addEventListener('click', () =>
+    closeModal(document.getElementById('budget-overlay')));
+  document.getElementById('btn-cancel-budgets')?.addEventListener('click', () =>
+    closeModal(document.getElementById('budget-overlay')));
+  document.getElementById('budget-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeModal(e.currentTarget);
+  });
+
+  // Insights button (top bar)
+  document.getElementById('btn-insights')?.addEventListener('click', openInsightsModal);
+
+  // Insights button from Settings
+  document.getElementById('btn-insights-from-settings')?.addEventListener('click', () => {
+    closeModal(document.getElementById('settings-overlay'));
+    setTimeout(() => openInsightsModal(), 300);
+  });
+  document.getElementById('insights-close')?.addEventListener('click', () =>
+    closeModal(document.getElementById('insights-overlay')));
+  document.getElementById('insights-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeModal(e.currentTarget);
+  });
+
+  // Report modal
+  document.getElementById('report-close')?.addEventListener('click', () =>
+    closeModal(document.getElementById('report-overlay')));
+  document.getElementById('report-close-btn')?.addEventListener('click', () =>
+    closeModal(document.getElementById('report-overlay')));
+  document.getElementById('report-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeModal(e.currentTarget);
+  });
+  document.getElementById('btn-export-report')?.addEventListener('click', exportReportCSV);
+
+  // Report preset buttons
+  document.querySelectorAll('.report-preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => applyReportPreset(btn.dataset.preset));
+  });
+
+  // Report date range inputs
+  document.getElementById('report-from')?.addEventListener('change', (e) => {
+    reportDateFrom = e.target.value;
+    reportPreset   = 'custom';
+    syncReportPresets();
+    renderReportPreview();
+  });
+  document.getElementById('report-to')?.addEventListener('change', (e) => {
+    reportDateTo = e.target.value;
+    reportPreset = 'custom';
+    syncReportPresets();
+    renderReportPreview();
+  });
+
+  // Recurring suggestions modal
+  document.getElementById('recurring-suggest-close')?.addEventListener('click', () =>
+    closeModal(document.getElementById('recurring-suggest-overlay')));
+  document.getElementById('recurring-suggest-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeModal(e.currentTarget);
+  });
+  document.getElementById('recurring-suggest-body')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.recurring-add-btn');
+    if (btn) addRecurringExpense(btn.dataset.recurringId);
+  });
+  document.getElementById('recurring-suggest-skip')?.addEventListener('click', () =>
+    closeModal(document.getElementById('recurring-suggest-overlay')));
+
+  // Clear all
   document.getElementById('btn-clear-all').addEventListener('click', () => {
     if (confirm('Delete ALL transactions? This cannot be undone.')) {
       expenses = [];
@@ -859,19 +1716,14 @@ function init() {
     }
 
     if (!isInputFocused && !anyOpen) {
-      if (e.key === 'n' || e.key === 'N') {
-        e.preventDefault();
-        openAddModal();
-      }
-      if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        openModal(document.getElementById('settings-overlay'));
-      }
+      if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openAddModal(); }
+      if (e.key === 's' || e.key === 'S') { e.preventDefault(); openModal(document.getElementById('settings-overlay')); }
       if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
         const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
         applyTheme(isDark ? 'light' : 'dark');
       }
+      if (e.key === 'i' || e.key === 'I') { e.preventDefault(); openInsightsModal(); }
     }
   });
 
@@ -889,6 +1741,9 @@ function init() {
   document.head.appendChild(styleEl);
 
   render();
+
+  // Check recurring suggestions after initial render
+  setTimeout(() => checkRecurringSuggestions(), 600);
 }
 
 document.addEventListener('DOMContentLoaded', init);
