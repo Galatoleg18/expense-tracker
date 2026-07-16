@@ -16,16 +16,9 @@ let isGuestMode = false;
 const SYNC_QUEUE_KEY = 'expenseflow_sync_queue';
 const GUEST_MODE_KEY = 'expenseflow_guest_mode';
 
-// Initialize Supabase client (called after DOM ready)
+// Initialize Supabase client (disabled — localStorage-only mode)
 function initSupabase() {
-  try {
-    if (window.supabase && window.supabase.createClient && SUPABASE_URL && SUPABASE_KEY && SUPABASE_KEY.length > 20) {
-      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-    }
-  } catch (err) {
-    console.warn('Supabase init failed, running in guest mode:', err);
-    supabase = null;
-  }
+  supabase = null;
 }
 
 // ========================================
@@ -1387,26 +1380,7 @@ function handleSave(e) {
     : `${cat.icon} ${currentType === 'income' ? 'Income' : 'Expense'} added · ${formatMoney(amount)}`;
   showToast(toastMsg);
 
-  // Sync to Supabase (background, offline-first)
-  if (currentUser && savedExpense) {
-    const syncAction = isEditing ? 'update' : 'insert';
-    enqueueSyncOp(syncAction, 'expenses', savedExpense);
-    if (navigator.onLine) {
-      setSyncStatus('syncing');
-      pushExpenseToSupabase(syncAction, savedExpense).then(ok => {
-        if (ok) {
-          // Remove from queue since it succeeded
-          const q = loadSyncQueue();
-          saveSyncQueue(q.filter(op => !(op.table === 'expenses' && op.data?.id === savedExpense.id && op.action === syncAction)));
-          setSyncStatus('synced');
-        } else {
-          setSyncStatus('offline');
-        }
-      });
-    } else {
-      setSyncStatus('offline');
-    }
-  }
+  // Cloud sync disabled — localStorage only
 
   // Offer template save for new non-recurring expenses
   if (!isEditing && currentType === 'expense' && savedExpense) {
@@ -2147,41 +2121,9 @@ async function init() {
     }
   });
 
-  // Check auth session
-  if (supabase) {
-    const { data: { session } } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
-    if (session?.user) {
-      currentUser = session.user;
-      isGuestMode = false;
-      updateAccountUI();
-      await pullFromSupabase();
-      render();
-      setSyncStatus(navigator.onLine ? 'synced' : 'offline');
-      setTimeout(() => flushSyncQueue(), 1000);
-    } else {
-      // Check if guest mode
-      const wasGuest = localStorage.getItem(GUEST_MODE_KEY);
-      if (wasGuest) {
-        enterGuestMode();
-      } else {
-        showAuthScreen();
-      }
-    }
-
-    // Listen for auth state changes (e.g. email confirmation)
-    supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session?.user && !currentUser) {
-        await onAuthSuccess(session.user, false);
-      } else if (event === 'SIGNED_OUT') {
-        currentUser = null;
-        updateAccountUI();
-        setSyncStatus('hidden');
-      }
-    });
-  } else {
-    // No Supabase — go straight to app (guest)
-    enterGuestMode();
-  }
+  // No cloud — go straight to app
+  hideAuthScreen();
+  render();
 
   // Currency select
   const currSelect = document.getElementById('currency-select');
