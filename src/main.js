@@ -19,11 +19,12 @@ const GUEST_MODE_KEY = 'expenseflow_guest_mode';
 // Initialize Supabase client (called after DOM ready)
 function initSupabase() {
   try {
-    if (window.supabase && window.supabase.createClient) {
+    if (window.supabase && window.supabase.createClient && SUPABASE_URL && SUPABASE_KEY && SUPABASE_KEY.length > 20) {
       supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     }
   } catch (err) {
     console.warn('Supabase init failed, running in guest mode:', err);
+    supabase = null;
   }
 }
 
@@ -392,8 +393,11 @@ async function pullFromSupabase() {
         if (!seenIds.has(e.id)) merged.push(e);
       });
 
-      expenses = merged;
-      saveData();
+      // Safety: never replace local data with fewer items unless server has data
+      if (merged.length >= expenses.length || expRows.length > 0) {
+        expenses = merged;
+        saveData();
+      }
     }
 
     // Pull budgets
@@ -588,7 +592,7 @@ const RECURRING_LABELS = {
 
 // --- State ---
 let expenses        = [];
-let currentPeriod   = 'day';
+let currentPeriod   = 'month';
 let periodOffset    = 0;
 let selectedCategory = null;
 let editingId       = null;
