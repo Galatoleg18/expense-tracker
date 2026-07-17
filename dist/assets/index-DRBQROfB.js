@@ -143,4 +143,4 @@ Category Summary
       60%      { transform: translateX(-4px); }
       80%      { transform: translateX(4px); }
     }
-  `,document.head.appendChild(n),k(),setTimeout(()=>Yt(),600)}document.addEventListener("DOMContentLoaded",Vt);
+  `,document.head.appendChild(n),k(),setTimeout(()=>Yt(),600)}document.addEventListener("DOMContentLoaded",Vt);"serviceWorker"in navigator&&navigator.serviceWorker.register("/sw.js").catch(()=>{});
